@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["DwarfSectionRelocTarget",""]],"fn":[["create_gdbjit_image",""],["emit_dwarf",""],["read_debuginfo",""],["write_debugsections",""]],"struct":[["DebugInfoData",""],["DwarfSection",""],["WasmFileInfo",""]]});
