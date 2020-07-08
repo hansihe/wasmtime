@@ -30,7 +30,7 @@
         clippy::use_self
     )
 )]
-#![no_std]
+//#![no_std]
 
 #[cfg(test)]
 extern crate alloc;
@@ -49,7 +49,7 @@ mod pool;
 mod set;
 
 pub use self::map::{Map, MapCursor, MapForest, MapIter};
-pub use self::set::{Set, SetCursor, SetForest, SetIter};
+pub use self::set::{Set, SetCursor, SetForest, BoundSet, SetIter};
 
 use self::node::NodeData;
 use self::path::Path;

@@ -30,6 +30,7 @@ where
 }
 
 /// Memory pool for a forest of `Set` instances.
+#[derive(Clone)]
 pub struct SetForest<K>
 where
     K: Copy,
@@ -175,6 +176,160 @@ where
             path: Path::default(),
         }
     }
+
+    /// Binds the set, its forest and its comparator into a single struct that
+    /// can be used for lookups.
+    pub fn bind<'a, C: Comparator<K>>(
+        &'a self,
+        forest: &'a SetForest<K>,
+        comp: &'a C,
+    ) -> BoundSet<'a, K, C> {
+        BoundSet {
+            set: self,
+            forest,
+            comp,
+        }
+    }
+
+    /// Makes a copy of the set in the given forest.
+    #[inline]
+    pub fn make_copy(&self, forest: &mut SetForest<K>) -> Self
+    where
+        K: Ord,
+    {
+
+        #[inline]
+        fn copy_rec<K: Copy>(node: Node, forest: &mut SetForest<K>) -> Node {
+            match forest.nodes[node] {
+                NodeData::Inner { size, keys, tree } => {
+                    let mut last = None;
+                    let mut new_tree = tree;
+                    for (idx, sub) in tree.iter().enumerate() {
+                        match last {
+                            Some((last_from, last_to)) if last_from == *sub => {
+                                new_tree[idx] = last_to;
+                            },
+                            _ => {
+                                let new_sub = copy_rec(*sub, forest);
+                                new_tree[idx] = new_sub;
+                                last = Some((*sub, new_sub));
+                            },
+                        }
+                    }
+                    forest.nodes.alloc_node(NodeData::Inner {
+                        size,
+                        keys,
+                        tree: new_tree,
+                    })
+                },
+                data @ NodeData::Leaf { .. } => {
+                    forest.nodes.alloc_node(data)
+                },
+                NodeData::Free { .. } => unreachable!(),
+            }
+        }
+
+        let mut set = Set::new();
+        if let Some(root) = self.root.expand() {
+            set.root = Some(copy_rec(root, forest)).into();
+        }
+        set
+    }
+
+}
+
+/// Bound set, a set, forest and comparator bundled into a single struct.
+/// Used to make passing a set around cleaner.
+pub struct BoundSet<'a, K, C>
+where
+    K: 'a + Copy,
+    C: 'a + Comparator<K>,
+{
+    set: &'a Set<K>,
+    forest: &'a SetForest<K>,
+    comp: &'a C,
+}
+
+impl<'a, K, C> BoundSet<'a, K, C>
+where
+    K: Copy,
+    C: Comparator<K>,
+{
+
+    /// Does the set contain `key`?.
+    pub fn contains(&self, entry: K) -> bool {
+        self.set.contains(entry, self.forest, self.comp)
+    }
+
+    /// Create an iterator traversing this set. The iterator type is `K`.
+    pub fn iter(&self) -> SetIter<'a, K> {
+        self.set.iter(self.forest)
+    }
+
+}
+
+impl<'a, K, C> std::fmt::Debug for BoundSet<'a, K, C>
+where
+    K: Copy + std::fmt::Debug,
+    C: Comparator<K>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let mut s = f.debug_set();
+        s.entries(self.iter());
+        s.finish()
+    }
+}
+
+impl<K> Set<K>
+where
+    K: Copy,
+{
+
+    /// Unions another set in the same forest into self.
+    pub fn union_from<C: Comparator<K>>(
+        &mut self,
+        other: &Set<K>,
+        forest: &mut SetForest<K>,
+        comp: &C,
+    ) {
+        let (mut self_path, mut other_path) = match (self.root.expand(), other.root.expand()) {
+            (_, None) => return,
+            (None, Some(other_root)) => {
+                let mut other_path = Path::default();
+                other_path.first(other_root, &forest.nodes);
+                let (other_node, other_entry) = other_path.leaf_pos().unwrap();
+                let other_elem = *forest.nodes[other_node].unwrap_leaf().0.get(other_entry).unwrap();
+                other_path.next(&forest.nodes);
+
+                let root = forest.nodes.alloc_node(NodeData::leaf(other_elem, SetValue()));
+                self.root = root.into();
+
+                let mut self_path = Path::default();
+                self_path.set_root_node(root);
+
+                (self_path, other_path)
+            },
+            (Some(self_root), Some(other_root)) => {
+                let mut self_path = Path::default();
+                self_path.first(self_root, &forest.nodes);
+
+                let mut other_path = Path::default();
+                other_path.first(other_root, &forest.nodes);
+
+                (self_path, other_path)
+            },
+        };
+        while let Some((other_node, other_entry)) = other_path.leaf_pos() {
+            let other_elem = *forest.nodes[other_node].unwrap_leaf().0.get(other_entry).unwrap();
+            other_path.next(&forest.nodes);
+
+            // TODO: Optimize the case where `self.path` is already at the correct insert pos.
+            if self_path.find(other_elem, self.root.unwrap(), &forest.nodes, comp).is_none() {
+                self.root = self_path.insert(other_elem, SetValue(), &mut forest.nodes).into();
+            }
+        }
+    }
+
 }
 
 impl<K> Default for Set<K>
@@ -523,6 +678,54 @@ mod tests {
         }
         assert_eq!(c.elem(), None);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn union_from() {
+        let mut f = SetForest::<u32>::new();
+        let mut s1 = Set::<u32>::new();
+        let mut s2 = Set::<u32>::new();
+
+        s2.insert(5, &mut f, &());
+        s2.insert(10, &mut f, &());
+        s2.insert(15, &mut f, &());
+
+        {
+            s1.union_from(&s2, &mut f, &());
+
+            assert!(s1.iter(&f).collect::<Vec<_>>() == vec![5, 10, 15]);
+
+            s1.clear(&mut f);
+            assert!(s1.is_empty());
+        }
+
+        {
+            s1.insert(1, &mut f, &());
+            s1.union_from(&s2, &mut f, &());
+            assert!(s1.iter(&f).collect::<Vec<_>>() == vec![1, 5, 10, 15]);
+
+            s1.clear(&mut f);
+            assert!(s1.is_empty());
+        }
+
+        {
+            s1.insert(1, &mut f, &());
+            s1.insert(12, &mut f, &());
+            s1.union_from(&s2, &mut f, &());
+            assert!(s1.iter(&f).collect::<Vec<_>>() == vec![1, 5, 10, 12, 15]);
+
+            s1.clear(&mut f);
+            assert!(s1.is_empty());
+        }
+
+        {
+            s1.insert(12, &mut f, &());
+            s1.union_from(&s2, &mut f, &());
+            assert!(s1.iter(&f).collect::<Vec<_>>() == vec![5, 10, 12, 15]);
+
+            s1.clear(&mut f);
+            assert!(s1.is_empty());
+        }
     }
 
     // Generate a densely populated 4-level tree.

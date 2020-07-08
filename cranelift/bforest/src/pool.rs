@@ -14,6 +14,15 @@ pub(super) struct NodePool<F: Forest> {
     freelist: Option<Node>,
 }
 
+impl<F: Forest> Clone for NodePool<F> {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            freelist: None,
+        }
+    }
+}
+
 impl<F: Forest> NodePool<F> {
     /// Allocate a new empty pool of nodes.
     pub fn new() -> Self {
